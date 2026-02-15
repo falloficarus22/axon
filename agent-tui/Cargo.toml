@@ -1,0 +1,74 @@
+[package]
+name = "agent-tui"
+version = "0.1.0"
+edition = "2021"
+authors = ["Agent TUI Team"]
+description = "Multi-agent orchestration TUI with dynamic routing"
+license = "MIT"
+repository = "https://github.com/yourusername/agent-tui"
+
+[[bin]]
+name = "agent-tui"
+path = "src/main.rs"
+
+[dependencies]
+# Async runtime
+tokio = { version = "1.43", features = ["full"] }
+tokio-util = "0.7"
+
+# TUI
+ratatui = "0.29"
+crossterm = "0.28"
+
+# OpenAI
+async-openai = "0.27"
+
+# Serialization
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"
+toml = "0.8"
+
+# Date/Time
+chrono = { version = "0.4", features = ["serde"] }
+
+# Errors
+anyhow = "1.0"
+thiserror = "2.0"
+
+# Configuration
+config = "0.15"
+dirs = "6.0"
+
+# Logging
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+
+# Utilities
+uuid = { version = "1.13", features = ["v4"] }
+rand = "0.8"
+regex = "1.11"
+lazy_static = "1.5"
+indexmap = "2.7"
+
+# Markdown (for chat display)
+pulldown-cmark = "0.13"
+
+# Syntax highlighting
+syntect = "5.2"
+
+# Futures
+futures = "0.3"
+
+[dev-dependencies]
+tempfile = "3.16"
+mockall = "0.13"
+
+[profile.release]
+opt-level = 3
+lto = true
+codegen-units = 1
+strip = true
+
+[profile.dev]
+opt-level = 0
+debug = true

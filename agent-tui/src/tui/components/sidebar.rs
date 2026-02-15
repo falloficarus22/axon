@@ -1,0 +1,159 @@
+use ratatui::{
+    layout::{Constraint, Direction, Layout, Rect},
+    style::{Color, Modifier, Style, Stylize},
+    text::{Line, Span, Text},
+    widgets::{Block, Borders, Clear, List, ListItem, Paragraph},
+    Frame,
+};
+
+use crate::types::{AgentState, Session, SessionMode};
+
+/// Sidebar component for displaying sessions and agents
+pub struct Sidebar {
+    /// Selected session index
+    selected_session: usize,
+    /// Selected agent index
+    selected_agent: usize,
+}
+
+impl Sidebar {
+    pub fn new() -> Self {
+        Self {
+            selected_session: 0,
+            selected_agent: 0,
+        }
+    }
+
+    /// Draw the sidebar
+    pub fn draw(&self, frame: &mut Frame, area: Rect, session: &Session) {
+        let layout = Layout::default()
+            .direction(Direction::Vertical)
+            .constraints([Constraint::Length(8), Constraint::Min(0)])
+            .split(area);
+
+        // Agent status section
+        self.draw_agent_status(frame, layout[0], session);
+
+        // Sessions section
+        self.draw_sessions(frame, layout[1], session);
+    }
+
+    /// Draw agent status panel
+    fn draw_agent_status(&self, frame: &mut Frame, area: Rect, session: &Session) {
+        let block = Block::default()
+            .title(" Agents ")
+            .borders(Borders::ALL)
+            .border_style(Style::default().fg(Color::Cyan));
+
+        // Placeholder agent statuses
+        let agents = vec![
+            ("planner", AgentState::Idle),
+            ("coder", AgentState::Idle),
+            ("reviewer", AgentState::Idle),
+            ("tester", AgentState::Idle),
+            ("explorer", AgentState::Idle),
+        ];
+
+        let mut lines = vec![];
+        lines.push(Line::from(vec![
+            Span::styled("Mode: ", Style::default().add_modifier(Modifier::BOLD)),
+            Span::styled(
+                match session.mode {
+                    SessionMode::Auto => "AUTO",
+                    SessionMode::Manual => "MANUAL",
+                },
+                Style::default().fg(Color::Yellow),
+            ),
+        ]));
+        lines.push(Line::from(""));
+
+        for (name, state) in agents {
+            let (icon, color) = match state {
+                AgentState::Idle => ("○", Color::Gray),
+                AgentState::Running => ("●", Color::Green),
+                AgentState::Completed => ("✓", Color::Blue),
+                AgentState::Failed => ("✗", Color::Red),
+            };
+
+            lines.push(Line::from(vec![
+                Span::styled(format!("{} ", icon), Style::default().fg(color)),
+                Span::raw(name),
+            ]));
+        }
+
+        lines.push(Line::from(""));
+        lines.push(Line::from(vec![
+            Span::styled("Active: ", Style::default().add_modifier(Modifier::BOLD)),
+            Span::styled(
+                session.active_agent.as_deref().unwrap_or("None"),
+                Style::default().fg(Color::Green),
+            ),
+        ]));
+
+        let paragraph = Paragraph::new(Text::from(lines)).block(block);
+
+        frame.render_widget(paragraph, area);
+    }
+
+    /// Draw sessions list
+    fn draw_sessions(&self, frame: &mut Frame, area: Rect, _session: &Session) {
+        let block = Block::default()
+            .title(" Sessions ")
+            .borders(Borders::ALL)
+            .border_style(Style::default().fg(Color::Cyan));
+
+        // Placeholder sessions
+        let sessions = vec![
+            "Current Session",
+            "Previous Session 1",
+            "Previous Session 2",
+        ];
+
+        let items: Vec<ListItem> = sessions
+            .iter()
+            .enumerate()
+            .map(|(i, s)| {
+                let style = if i == self.selected_session {
+                    Style::default()
+                        .bg(Color::Blue)
+                        .fg(Color::White)
+                        .add_modifier(Modifier::BOLD)
+                } else {
+                    Style::default()
+                };
+                ListItem::new(*s).style(style)
+            })
+            .collect();
+
+        let list = List::new(items)
+            .block(block)
+            .highlight_style(Style::default().add_modifier(Modifier::BOLD));
+
+        frame.render_widget(list, area);
+    }
+
+    /// Navigate sessions up
+    pub fn previous_session(&mut self) {
+        if self.selected_session > 0 {
+            self.selected_session -= 1;
+        }
+    }
+
+    /// Navigate sessions down
+    pub fn next_session(&mut self, max: usize) {
+        if self.selected_session < max.saturating_sub(1) {
+            self.selected_session += 1;
+        }
+    }
+
+    /// Get selected session index
+    pub fn selected_session(&self) -> usize {
+        self.selected_session
+    }
+}
+
+impl Default for Sidebar {
+    fn default() -> Self {
+        Self::new()
+    }
+}
