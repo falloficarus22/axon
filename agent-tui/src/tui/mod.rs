@@ -23,6 +23,7 @@ use tracing::{debug, error, info, warn};
 
 use crate::{
     config::Config,
+    llm::LlmClient,
     types::{AppEvent, Id, Message, MessageRole, Session, SessionMode, AgentState},
 };
 
@@ -40,6 +41,8 @@ pub struct App {
     input: Input,
     /// Sidebar component
     sidebar: Sidebar,
+    /// LLM client
+    llm_client: Option<LlmClient>,
     /// Whether the app should quit
     should_quit: bool,
     /// Show sidebar
@@ -78,12 +81,42 @@ impl App {
         
         let session = Session::new("New Session");
         
+        // Initialize LLM client if API key is available
+        let llm_client = if config.llm.api_key.starts_with("$") {
+            // Try to get from environment variable
+            let env_var = &config.llm.api_key[1..];
+            match std::env::var(env_var) {
+                Ok(api_key) => {
+                    info!("Initializing LLM client with API key from environment");
+                    Some(LlmClient::new(
+                        &api_key,
+                        &config.llm.model,
+                        config.llm.max_tokens,
+                        config.llm.temperature,
+                    ))
+                }
+                Err(_) => {
+                    warn!("LLM API key environment variable '{}' not set", env_var);
+                    None
+                }
+            }
+        } else {
+            info!("Initializing LLM client with configured API key");
+            Some(LlmClient::new(
+                &config.llm.api_key,
+                &config.llm.model,
+                config.llm.max_tokens,
+                config.llm.temperature,
+            ))
+        };
+        
         Ok(Self {
             config: config.clone(),
             session: session.clone(),
             chat: Chat::new(),
             input: Input::new(),
             sidebar: Sidebar::new(),
+            llm_client,
             should_quit: false,
             show_sidebar: true,
             mode: AppMode::Normal,
@@ -310,11 +343,46 @@ impl App {
         // Clear input
         self.input.clear();
 
-        // TODO: Process the message through the orchestrator
-        // For now, just echo back
-        let response = Message::system("Message received. Agent orchestration not yet implemented.");
-        self.session.add_message(response.clone());
-        self.chat.add_message(response);
+        // Check if we have an LLM client
+        if let Some(client) = &self.llm_client {
+            // Create system message for context
+            let system_msg = Message::system("You are a helpful AI assistant.");
+            
+            // Build message history (last 10 messages for context)
+            let history: Vec<Message> = self
+                .session
+                .messages
+                .iter()
+                .rev()
+                .take(10)
+                .rev()
+                .cloned()
+                .collect();
+            
+            // Add system message at the beginning
+            let mut messages = vec![system_msg];
+            messages.extend(history);
+
+            // Send to LLM
+            match client.send_message(&messages).await {
+                Ok(response) => {
+                    let response_msg = Message::agent(&response, "assistant");
+                    self.session.add_message(response_msg.clone());
+                    self.chat.add_message(response_msg);
+                }
+                Err(e) => {
+                    let error_msg = Message::system(&format!("Error from LLM: {}", e));
+                    self.session.add_message(error_msg.clone());
+                    self.chat.add_message(error_msg);
+                }
+            }
+        } else {
+            let response = Message::system(
+                "No LLM client configured. Please set OPENAI_API_KEY environment variable or configure api_key in ~/.config/agent-tui/config.toml"
+            );
+            self.session.add_message(response.clone());
+            self.chat.add_message(response);
+        }
 
         Ok(())
     }

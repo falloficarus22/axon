@@ -1,8 +1,8 @@
 use ratatui::{
-    layout::{Constraint, Direction, Layout, Rect},
+    layout::{Constraint, Direction, Layout, Margin, Rect},
     style::{Color, Modifier, Style, Stylize},
     text::{Line, Span, Text},
-    widgets::{Block, Borders, Paragraph, Scrollbar, ScrollbarOrientation, Wrap},
+    widgets::{Block, Borders, Paragraph, Scrollbar, ScrollbarOrientation, ScrollbarState, Wrap},
     Frame,
 };
 
@@ -14,6 +14,8 @@ pub struct Chat {
     scroll: u16,
     /// Whether to auto-scroll to bottom
     auto_scroll: bool,
+    /// Scrollbar state
+    scroll_state: ScrollbarState,
 }
 
 impl Chat {
@@ -21,11 +23,12 @@ impl Chat {
         Self {
             scroll: 0,
             auto_scroll: true,
+            scroll_state: ScrollbarState::new(0),
         }
     }
 
     /// Add a message to the chat
-    pub fn add_message(&mut self, message: Message) {
+    pub fn add_message(&mut self, _message: Message) {
         // Message is stored in session, we just trigger a re-render
         if self.auto_scroll {
             self.scroll = u16::MAX;
@@ -35,22 +38,25 @@ impl Chat {
     /// Clear the chat display
     pub fn clear(&mut self) {
         self.scroll = 0;
+        self.scroll_state = ScrollbarState::new(0);
     }
 
     /// Scroll up
     pub fn scroll_up(&mut self, amount: u16) {
         self.auto_scroll = false;
         self.scroll = self.scroll.saturating_sub(amount);
+        self.scroll_state = self.scroll_state.position(self.scroll as usize);
     }
 
     /// Scroll down
     pub fn scroll_down(&mut self, amount: u16) {
         self.scroll = self.scroll.saturating_add(amount);
+        self.scroll_state = self.scroll_state.position(self.scroll as usize);
         // TODO: Check if at bottom to re-enable auto-scroll
     }
 
     /// Draw the chat component
-    pub fn draw(&self, frame: &mut Frame, area: Rect, session: &Session) {
+    pub fn draw(&mut self, frame: &mut Frame, area: Rect, session: &Session) {
         let block = Block::default()
             .title(format!(" Chat - {} ", session.title))
             .borders(Borders::ALL)
@@ -111,6 +117,9 @@ impl Chat {
             text_lines.push(Line::from(""));
         }
 
+        let content_height = text_lines.len();
+        self.scroll_state = self.scroll_state.content_length(content_height);
+
         let paragraph = Paragraph::new(Text::from(text_lines))
             .block(block)
             .wrap(Wrap { trim: true })
@@ -130,7 +139,7 @@ impl Chat {
                 vertical: 1,
                 horizontal: 0,
             }),
-            &mut self.scroll.into(),
+            &mut self.scroll_state,
         );
     }
 }

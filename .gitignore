@@ -1,0 +1,35 @@
+# Rust
+target/
+Cargo.lock
+**/*.rs.bk
+*.pdb
+
+# IDE
+.idea/
+.vscode/
+*.swp
+*.swo
+*~
+.DS_Store
+
+# Environment
+.env
+.env.local
+.env.*.local
+
+# Logs
+*.log
+logs/
+
+# Agent TUI specific
+~/.agent-tui/
+*.session
+*.memory
+
+# Testing
+tarpaulin-report.html
+cobertura.xml
+
+# OS
+Thumbs.db
+.DS_Store

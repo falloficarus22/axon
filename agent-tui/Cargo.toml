@@ -5,7 +5,7 @@ edition = "2021"
 authors = ["Agent TUI Team"]
 description = "Multi-agent orchestration TUI with dynamic routing"
 license = "MIT"
-repository = "https://github.com/yourusername/agent-tui"
+repository = "https://github.com/falloficarus22/axon"
 
 [[bin]]
 name = "agent-tui"
