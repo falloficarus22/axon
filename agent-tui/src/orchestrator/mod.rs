@@ -92,14 +92,8 @@ impl ExecutionContext {
 
 /// Task executor that manages agent execution
 pub struct Executor {
-    /// LLM client for agents
-    llm_client: Arc<LlmClient>,
-    /// Event sender
-    event_tx: mpsc::Sender<AgentEvent>,
-    /// Active agent instances
-    active_agents: Arc<tokio::sync::RwLock<std::collections::HashMap<Id, AgentInstance>>>,
-    /// Maximum concurrent agents
-    max_concurrent: usize,
+    /// Agent pool for managing running agents
+    pool: AgentPool,
 }
 
 impl Executor {
@@ -110,10 +104,7 @@ impl Executor {
         max_concurrent: usize,
     ) -> Self {
         Self {
-            llm_client,
-            event_tx,
-            active_agents: Arc::new(tokio::sync::RwLock::new(std::collections::HashMap::new())),
-            max_concurrent,
+            pool: AgentPool::new(max_concurrent, llm_client, event_tx),
         }
     }
 
@@ -126,24 +117,17 @@ impl Executor {
     ) -> Result<TaskResult> {
         info!("Executing task {} with agent {}", task.id, agent.name);
 
-        // Build and spawn the agent runtime
-        let instance = AgentRuntimeBuilder::new()
-            .agent(agent.clone())
-            .llm_client(self.llm_client.clone())
-            .event_tx(self.event_tx.clone())
-            .spawn()?;
-
-        let handle = instance.handle.clone();
         let agent_id = agent.id.clone();
-
-        // Store the active agent
-        self.active_agents.write().await.insert(agent_id.clone(), instance);
+        
+        // Get agent from pool or spawn if not running
+        let handle = if let Some(handle) = self.pool.get_agent(&agent_id).await {
+            handle
+        } else {
+            self.pool.spawn_agent(agent).await?
+        };
 
         // Execute the task
         let result = handle.process_task(task, context.messages).await;
-
-        // Clean up
-        self.active_agents.write().await.remove(&agent_id);
 
         result.map_err(|e| anyhow!("Task execution failed: {}", e))
     }
@@ -157,59 +141,63 @@ impl Executor {
     ) -> Result<String> {
         debug!("Executing chat with agent {}", agent.name);
 
-        // Build and spawn the agent runtime
-        let instance = AgentRuntimeBuilder::new()
-            .agent(agent)
-            .llm_client(self.llm_client.clone())
-            .event_tx(self.event_tx.clone())
-            .spawn()?;
+        let agent_id = agent.id.clone();
 
-        let handle = instance.handle.clone();
-        let agent_id = instance.id();
-
-        // Store the active agent
-        self.active_agents.write().await.insert(agent_id.clone(), instance);
+        // Get agent from pool or spawn if not running
+        let handle = if let Some(handle) = self.pool.get_agent(&agent_id).await {
+            handle
+        } else {
+            self.pool.spawn_agent(agent).await?
+        };
 
         // Execute the chat
         let result = handle.chat(message, history).await;
 
-        // Clean up
-        self.active_agents.write().await.remove(&agent_id);
-
         result.map_err(|e| anyhow!("Chat execution failed: {}", e))
+    }
+
+    /// Execute a simple streaming chat request with an agent
+    pub async fn execute_chat_streaming(
+        &self,
+        agent: Agent,
+        message: String,
+        history: Vec<Message>,
+    ) -> Result<String> {
+        debug!("Executing streaming chat with agent {}", agent.name);
+
+        let agent_id = agent.id.clone();
+
+        // Get agent from pool or spawn if not running
+        let handle = if let Some(handle) = self.pool.get_agent(&agent_id).await {
+            handle
+        } else {
+            self.pool.spawn_agent(agent).await?
+        };
+
+        // Execute the streaming chat
+        let result = handle.chat_streaming(message, history).await;
+
+        result.map_err(|e| anyhow!("Streaming chat execution failed: {}", e))
     }
 
     /// Get count of currently active agents
     pub async fn active_count(&self) -> usize {
-        self.active_agents.read().await.len()
+        self.pool.active_count().await
     }
 
     /// Check if at capacity
     pub async fn is_at_capacity(&self) -> bool {
-        self.active_count().await >= self.max_concurrent
+        self.pool.is_at_capacity().await
     }
 
     /// Get agent state
     pub async fn get_agent_state(&self, agent_id: &Id) -> Option<AgentState> {
-        if let Some(instance) = self.active_agents.read().await.get(agent_id) {
-            Some(instance.state().await)
-        } else {
-            None
-        }
+        self.pool.get_agent_state(agent_id).await
     }
 
     /// Shutdown all active agents
     pub async fn shutdown_all(&self) -> Result<()> {
-        let agents: Vec<Id> = self.active_agents.read().await.keys().cloned().collect();
-        
-        for agent_id in agents {
-            if let Some(instance) = self.active_agents.write().await.remove(&agent_id) {
-                let _ = instance.handle.shutdown().await;
-            }
-        }
-
-        info!("All agents shut down");
-        Ok(())
+        self.pool.shutdown_all().await
     }
 }
 
@@ -274,6 +262,16 @@ impl Orchestrator {
         history: Vec<Message>,
     ) -> Result<String> {
         self.executor.execute_chat(agent, message, history).await
+    }
+
+    /// Execute a streaming chat with a specific agent
+    pub async fn execute_chat_streaming(
+        &self,
+        agent: Agent,
+        message: String,
+        history: Vec<Message>,
+    ) -> Result<String> {
+        self.executor.execute_chat_streaming(agent, message, history).await
     }
 
     /// Execute a task with a specific agent

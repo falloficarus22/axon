@@ -415,6 +415,11 @@ impl ExecutionContext {
 pub enum AppEvent {
     /// New message received
     MessageReceived(Message),
+    /// Part of a streaming message received
+    MessageUpdate {
+        agent_id: Id,
+        content: String,
+    },
     /// Agent state changed
     AgentStateChanged(Id, AgentState),
     /// Task status changed

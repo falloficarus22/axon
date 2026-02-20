@@ -26,6 +26,11 @@ pub enum AgentCommand {
         message: String,
         history: Vec<Message>,
     },
+    /// Send a streaming chat message
+    StreamChat {
+        message: String,
+        history: Vec<Message>,
+    },
     /// Get the current state of the agent
     GetState,
     /// Shutdown the agent
@@ -94,6 +99,15 @@ impl AgentHandle {
     /// Send a chat message
     pub async fn chat(&self, message: String, history: Vec<Message>) -> Result<String> {
         match self.send_command(AgentCommand::Chat { message, history }).await? {
+            AgentResponse::ChatResponse(content) => Ok(content),
+            AgentResponse::Error(e) => Err(anyhow!(e)),
+            _ => Err(anyhow!("Unexpected response from agent")),
+        }
+    }
+
+    /// Send a streaming chat message
+    pub async fn chat_streaming(&self, message: String, history: Vec<Message>) -> Result<String> {
+        match self.send_command(AgentCommand::StreamChat { message, history }).await? {
             AgentResponse::ChatResponse(content) => Ok(content),
             AgentResponse::Error(e) => Err(anyhow!(e)),
             _ => Err(anyhow!("Unexpected response from agent")),
@@ -209,6 +223,9 @@ impl AgentRuntime {
             AgentCommand::Chat { message, history } => {
                 self.handle_chat(agent_id, message, history).await
             }
+            AgentCommand::StreamChat { message, history } => {
+                self.handle_stream_chat(agent_id, message, history).await
+            }
             AgentCommand::GetState => {
                 let state = self.agent.read().await.state;
                 AgentResponse::State(state)
@@ -302,6 +319,64 @@ impl AgentRuntime {
                 }).await;
 
                 AgentResponse::Error(error_msg)
+            }
+        }
+    }
+
+    /// Handle streaming chat message
+    async fn handle_stream_chat(
+        &mut self,
+        agent_id: &Id,
+        message: String,
+        history: Vec<Message>,
+    ) -> AgentResponse {
+        // Update state to running
+        {
+            let mut agent = self.agent.write().await;
+            agent.state = AgentState::Running;
+        }
+
+        // Build messages for LLM
+        let agent = self.agent.read().await;
+        let system_prompt = if agent.system_prompt.is_empty() {
+            format!("You are a {} agent. {}", agent.role.as_str(), agent.role.description())
+        } else {
+            agent.system_prompt.clone()
+        };
+        drop(agent);
+
+        let mut messages = vec![Message::system(&system_prompt)];
+        messages.extend(history);
+        messages.push(Message::user(&message));
+
+        // Send to LLM for streaming
+        match self.llm_client.send_message_streaming(&messages).await {
+            Ok(mut stream) => {
+                let mut full_response = String::new();
+                while let Some(Ok(content)) = stream.next().await {
+                    full_response.push_str(&content);
+                    let _ = self.event_tx.send(AgentEvent::Message {
+                        agent_id: agent_id.clone(),
+                        content,
+                    }).await;
+                }
+                
+                // Update state back to idle
+                {
+                    let mut agent = self.agent.write().await;
+                    agent.state = AgentState::Idle;
+                }
+
+                AgentResponse::ChatResponse(full_response)
+            }
+            Err(e) => {
+                // Update state to failed
+                {
+                    let mut agent = self.agent.write().await;
+                    agent.state = AgentState::Failed;
+                }
+
+                AgentResponse::Error(e.to_string())
             }
         }
     }

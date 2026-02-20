@@ -50,7 +50,7 @@ pub struct App {
     /// LLM client
     llm_client: Option<Arc<LlmClient>>,
     /// Orchestrator for task execution
-    orchestrator: Option<Orchestrator>,
+    orchestrator: Option<Arc<Orchestrator>>,
     /// Agent registry
     agent_registry: AgentRegistry,
     /// Active agent for manual mode
@@ -129,11 +129,11 @@ impl App {
         
         // Initialize orchestrator if we have an LLM client
         let orchestrator = llm_client.as_ref().map(|client| {
-            Orchestrator::new(
+            Arc::new(Orchestrator::new(
                 client.clone(),
                 agent_event_tx.clone(),
                 config.orchestration.max_concurrent_agents,
-            )
+            ))
         });
         
         // Initialize agent registry with default agents
@@ -315,17 +315,15 @@ impl App {
                     self.mode = AppMode::Normal;
                 }
                 KeyCode::Char(c) if c.is_ascii_digit() => {
-                    let idx = c.to_digit(10).unwrap() as usize;
-                    // Select agent by index
-                    let agent_names = vec!["planner", "coder", "reviewer", "tester", "explorer", "integrator"];
-                    if idx > 0 && idx <= agent_names.len() {
-                        let agent_name = agent_names[idx - 1];
-                        if let Some(agent) = self.agent_registry.get(agent_name) {
-                            self.active_agent = Some(agent.clone());
-                            let msg = Message::system(&format!("Selected agent: {}", agent_name));
-                            self.session.add_message(msg.clone());
-                            self.chat.add_message(msg);
-                        }
+                    let idx = (c.to_digit(10).unwrap() as usize).saturating_sub(1);
+                    let agents = self.agent_registry.list();
+                    
+                    if idx < agents.len() {
+                        let agent = &agents[idx];
+                        self.active_agent = Some(agent.clone());
+                        let msg = Message::system(&format!("Selected agent: {} ({})", agent.name, agent.role.as_str()));
+                        self.session.add_message(msg.clone());
+                        self.chat.add_message(msg);
                     }
                     self.mode = AppMode::Normal;
                 }
@@ -359,9 +357,20 @@ impl App {
                 self.session.add_message(msg.clone());
                 self.chat.add_message(msg);
             }
-            AppEvent::AgentStateChanged(agent_id, state) => {
-                debug!("Agent {} state changed to {:?}", agent_id, state);
-                // TODO: Update sidebar with agent states
+            AppEvent::MessageUpdate { agent_id, content } => {
+                if let Some(last_message) = self.session.messages.last_mut() {
+                    if last_message.role == MessageRole::Agent && last_message.agent_id.as_deref() == Some(agent_id.as_str()) {
+                        last_message.content.push_str(&content);
+                    } else {
+                        // Last message is not from the same agent, create a new one
+                        let msg = Message::agent(&content, &agent_id);
+                        self.session.add_message(msg);
+                    }
+                } else {
+                    // No messages yet, create a new one
+                    let msg = Message::agent(&content, &agent_id);
+                    self.session.add_message(msg);
+                }
             }
             AppEvent::TaskStatusChanged(task_id, status) => {
                 debug!("Task {} status changed to {:?}", task_id, status);
@@ -410,8 +419,7 @@ impl App {
                 }
             }
             AgentEvent::Message { agent_id, content } => {
-                // Streaming message (not used in basic implementation)
-                debug!("Agent {} message: {}", agent_id, content);
+                let _ = self.event_tx.send(AppEvent::MessageUpdate { agent_id, content }).await;
             }
             AgentEvent::Error { agent_id, error } => {
                 error!("Agent {} error: {}", agent_id, error);
@@ -490,9 +498,7 @@ impl App {
             // Clone what we need for the async task
             let agent_name = agent.name.clone();
             let event_tx = self.event_tx.clone();
-            let llm_client = self.llm_client.clone().unwrap();
-            let agent_event_tx = self.agent_event_tx.clone();
-            let max_concurrent = self.config.orchestration.max_concurrent_agents;
+            let orchestrator = orchestrator.clone();
             
             // Show that we're processing
             let processing_msg = Message::system(&format!("Agent '{}' is processing...", agent_name));
@@ -501,16 +507,13 @@ impl App {
 
             // Spawn the agent execution in a background task
             tokio::spawn(async move {
-                // Create a temporary executor for this task
-                use crate::orchestrator::Executor;
-                let executor = Executor::new(llm_client, agent_event_tx, max_concurrent);
-                let result = executor.execute_chat(agent, content, history).await;
+                let result = orchestrator.execute_chat_streaming(agent, content, history).await;
                 
                 match result {
                     Ok(response) => {
-                        let _ = event_tx.send(AppEvent::MessageReceived(
-                            Message::agent(&response, &agent_name)
-                        )).await;
+                        // The full response is received, but streaming updates have already been sent.
+                        // We can use this to finalize the message, e.g., save it.
+                        // For now, we do nothing as the streaming handles the display.
                     }
                     Err(e) => {
                         let _ = event_tx.send(AppEvent::Error(format!(
