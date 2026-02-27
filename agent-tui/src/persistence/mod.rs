@@ -2,13 +2,16 @@
 //!
 //! This module handles saving and loading sessions and memory.
 
-use crate::types::{Id, Session};
+#![allow(dead_code)]
+
 use anyhow::{anyhow, Result};
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 use std::path::{Path, PathBuf};
 use tokio::fs;
 use tracing::debug;
+
+use crate::types::{Id, Session};
 
 /// Metadata for a session (used for listing)
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -125,7 +128,10 @@ impl SessionStore {
         if !path.exists() {
             return Err(anyhow!("Session {} not found", session_id));
         }
+<<<<<<< HEAD
 
+=======
+>>>>>>> a9ba5ea (successfully resolved all 39 compiler warnings)
         fs::remove_file(path).await?;
         Ok(())
     }

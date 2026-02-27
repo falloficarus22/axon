@@ -3,6 +3,8 @@
 //! This module provides management of multiple running agents,
 //! including lifecycle management, health checks, and resource limits.
 
+#![allow(dead_code)]
+
 use std::sync::Arc;
 use std::collections::HashMap;
 use tokio::sync::{mpsc, RwLock};

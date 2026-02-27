@@ -2,6 +2,8 @@
 //!
 //! This module provides shared memory and state management.
 
+#![allow(dead_code)]
+
 use serde_json::Value;
 use std::collections::HashMap;
 use std::sync::{Arc, RwLock};

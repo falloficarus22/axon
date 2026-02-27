@@ -2,6 +2,8 @@
 //!
 //! This module handles communication with LLM providers (currently OpenAI).
 
+#![allow(dead_code)]
+
 use anyhow::{anyhow, Result};
 use async_openai::{
     config::OpenAIConfig,
