@@ -490,6 +490,7 @@ mod tests {
         };
 
         let decision = router.route(task, analysis).await.unwrap();
+        
 
         // No agents should be selected (all below AGENT_CONFIDENCE_THRESHOLD)
         assert_eq!(decision.selected_agents.len(), 0);
