@@ -33,6 +33,7 @@ impl AgentRegistry {
         self.agents.iter().find(|a| a.id == id)
     }
 
+    #[allow(dead_code)]
     pub fn get_by_name(&self, name: &str) -> Option<&Agent> {
         self.agents.iter().find(|a| a.name == name)
     }
@@ -41,10 +42,12 @@ impl AgentRegistry {
         &self.agents
     }
 
+    #[allow(dead_code)]
     pub fn by_role(&self, role: AgentRole) -> Vec<&Agent> {
         self.agents.iter().filter(|a| a.role == role).collect()
     }
 
+    #[allow(dead_code)]
     pub fn by_capability(&self, capability: Capability) -> Vec<&Agent> {
         self.agents.iter().filter(|a| a.capabilities.contains(&capability)).collect()
     }

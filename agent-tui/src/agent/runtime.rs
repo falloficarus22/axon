@@ -3,6 +3,8 @@
 //! This module provides the runtime environment for agents to execute tasks.
 //! Agents run as async tasks and communicate via message passing.
 
+#![allow(dead_code)]
+
 use std::sync::Arc;
 use tokio::sync::{mpsc, oneshot, RwLock};
 use tracing::info;

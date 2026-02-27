@@ -1,13 +1,16 @@
 pub mod coder;
 
+#[allow(unused_imports)]
 pub use coder::{CodeBlock, CodeChange, CoderAgent, FileOperation};
 
 use crate::types::Agent;
 
 /// Built-in agent implementations
 /// Planner agent for task decomposition
+#[allow(dead_code)]
 pub struct PlannerAgent;
 
+#[allow(dead_code)]
 impl PlannerAgent {
     pub fn create() -> Agent {
         Agent::new("planner", crate::types::AgentRole::Planner, "gpt-4o")
@@ -26,8 +29,10 @@ impl PlannerAgent {
 }
 
 /// Reviewer agent for code review
+#[allow(dead_code)]
 pub struct ReviewerAgent;
 
+#[allow(dead_code)]
 impl ReviewerAgent {
     pub fn create() -> Agent {
         Agent::new("reviewer", crate::types::AgentRole::Reviewer, "gpt-4o-mini")
@@ -46,8 +51,10 @@ impl ReviewerAgent {
 }
 
 /// Tester agent for test generation
+#[allow(dead_code)]
 pub struct TesterAgent;
 
+#[allow(dead_code)]
 impl TesterAgent {
     pub fn create() -> Agent {
         Agent::new("tester", crate::types::AgentRole::Tester, "gpt-4o-mini")
@@ -66,8 +73,10 @@ impl TesterAgent {
 }
 
 /// Explorer agent for codebase exploration
+#[allow(dead_code)]
 pub struct ExplorerAgent;
 
+#[allow(dead_code)]
 impl ExplorerAgent {
     pub fn create() -> Agent {
         Agent::new("explorer", crate::types::AgentRole::Explorer, "gpt-4o-mini")
@@ -86,8 +95,10 @@ impl ExplorerAgent {
 }
 
 /// Integrator agent for result synthesis
+#[allow(dead_code)]
 pub struct IntegratorAgent;
 
+#[allow(dead_code)]
 impl IntegratorAgent {
     pub fn create() -> Agent {
         Agent::new("integrator", crate::types::AgentRole::Integrator, "gpt-4o")
