@@ -7,15 +7,16 @@ pub mod pool;
 pub use pool::AgentPool;
 
 use anyhow::{anyhow, Result};
+use std::collections::HashMap;
 use std::sync::Arc;
 use tokio::sync::{mpsc, RwLock};
-use tracing::{debug, info};
+use tracing::{debug, info, warn};
 
 use crate::{
     agent::{AgentEvent, AgentRegistry},
     llm::LlmClient,
     shared::SharedMemory,
-    types::{Agent, AgentState, Task, TaskResult, RoutingDecision, RoutingAnalysis, Session, Id, Message, MessageRole, TaskType},
+    types::{Agent, AgentState, Task, TaskResult, RoutingDecision, RoutingAnalysis, Session, Id, Message, MessageRole, TaskType, Plan, Subtask},
 };
 
 /// Confidence threshold for agent selection in routing
@@ -144,17 +145,212 @@ impl Default for Router {
 }
 
 /// Task planner for decomposition
-pub struct Planner;
+pub struct Planner {
+    llm_client: Option<Arc<LlmClient>>,
+}
 
 impl Planner {
-    pub fn new() -> Self {
-        Self
+    pub fn new(llm_client: Option<Arc<LlmClient>>) -> Self {
+        Self { llm_client }
     }
 
-    /// Decompose a task into subtasks
-    pub async fn plan(&self, _task: &Task) -> Result<Vec<Task>> {
-        // TODO: Implement task decomposition
-        Ok(vec![])
+    /// Decompose a task into subtasks using LLM
+    pub async fn plan(&self, task: &Task, session: &Session, registry: &AgentRegistry) -> Result<Plan> {
+        info!("Planning task decomposition: {}", task.description);
+
+        // If no LLM client, return a simple plan with the original task
+        let llm_client = match &self.llm_client {
+            Some(client) => client,
+            None => {
+                warn!("No LLM client available for planning, returning single-task plan");
+                let mut plan = Plan::new(task.clone());
+                let subtask = Subtask::new(&task.description, task.task_type);
+                plan.subtasks = vec![subtask];
+                return Ok(plan);
+            }
+        };
+
+        // Get agent descriptions for the LLM
+        let agents = registry.list();
+        let mut agent_descriptions = String::new();
+        for agent in agents {
+            let caps: Vec<String> = agent.capabilities.iter().map(|c| {
+                match c {
+                    crate::types::Capability::Code => "code".to_string(),
+                    crate::types::Capability::Refactor => "refactor".to_string(),
+                    crate::types::Capability::Debug => "debug".to_string(),
+                    crate::types::Capability::Optimize => "optimize".to_string(),
+                    crate::types::Capability::Review => "review".to_string(),
+                    crate::types::Capability::Test => "test".to_string(),
+                    crate::types::Capability::Explore => "explore".to_string(),
+                    crate::types::Capability::Plan => "plan".to_string(),
+                    crate::types::Capability::Document => "document".to_string(),
+                }
+            }).collect();
+            agent_descriptions.push_str(&format!(
+                "- {} (role: {}): {} | capabilities: {}\n",
+                agent.name,
+                agent.role.as_str(),
+                agent.description,
+                caps.join(", ")
+            ));
+        }
+
+        // Get recent context from session
+        let mut history = String::new();
+        for msg in session.messages.iter().rev().take(5).rev() {
+            let role = match msg.role {
+                MessageRole::User => "User",
+                MessageRole::Agent => "Agent",
+                MessageRole::System => "System",
+            };
+            history.push_str(&format!("{}: {}\n", role, msg.content));
+        }
+
+        let prompt = format!(
+            "You are an expert task planner. Decompose the following task into logical subtasks.\n\n\
+            Available Agents:\n{}\n\
+            Recent Conversation:\n{}\n\
+            Current Task: {}\n\n\
+            For complex tasks, break them down into 2-6 subtasks.\n\
+            For each subtask, suggest the most appropriate agent.\n\
+            Identify which subtasks can run in parallel.\n\
+            Specify dependencies between subtasks.\n\n\
+            Respond ONLY with a JSON object in this format:\n\
+            {{\n  \
+            \"subtasks\": [\n    \
+              {{\n      \
+              \"description\": \"subtask description\",\n      \
+              \"task_type\": \"CodeGeneration|CodeEdit|CodeReview|TestGeneration|TestExecution|Exploration|Planning|Synthesis|General\",\n      \
+              \"suggested_agent\": \"agent_name\",\n      \
+              \"dependencies\": [\"index of prior subtasks this depends on, empty if none\"]\n    \
+              }}\n  \
+            ],\n  \
+            \"parallel_groups\": [[indices of subtasks that can run together]]\n\
+            }}\n\n\
+            Example:\n\
+            {{\n  \
+            \"subtasks\": [\n    \
+              {{\"description\": \"Explore the codebase structure\", \"task_type\": \"Exploration\", \"suggested_agent\": \"explorer\", \"dependencies\": []}},\n    \
+              {{\"description\": \"Write the main function\", \"task_type\": \"CodeGeneration\", \"suggested_agent\": \"coder\", \"dependencies\": [0]}},\n    \
+              {{\"description\": \"Write unit tests\", \"task_type\": \"TestGeneration\", \"suggested_agent\": \"tester\", \"dependencies\": [1]}}\n  \
+            ],\n  \
+            \"parallel_groups\": [[0]]\n\
+            }}",
+            agent_descriptions, history, task.description
+        );
+
+        let messages = vec![Message::system(&prompt)];
+        let response = llm_client.send_message(&messages).await?;
+
+        // Clean up response in case LLM adds markdown blocks
+        let clean_response = response
+            .trim()
+            .trim_start_matches("```json")
+            .trim_end_matches("```")
+            .trim();
+
+        let analysis_json: serde_json::Value = serde_json::from_str(clean_response)
+            .map_err(|e| anyhow!("Failed to parse plan: {}. Response was: {}", e, clean_response))?;
+
+        let mut subtasks = Vec::new();
+        let mut parallel_groups = Vec::new();
+
+        // Parse subtasks
+        if let Some(subtasks_arr) = analysis_json["subtasks"].as_array() {
+            for (idx, item) in subtasks_arr.iter().enumerate() {
+                let default_desc = format!("Subtask {}", idx);
+                let description = item["description"].as_str().unwrap_or(&default_desc);
+                let task_type_str = item["task_type"].as_str().unwrap_or("General");
+                let suggested_agent = item["suggested_agent"].as_str();
+                let deps_arr = item["dependencies"].as_array();
+
+                let task_type = match task_type_str {
+                    "CodeGeneration" => TaskType::CodeGeneration,
+                    "CodeEdit" => TaskType::CodeEdit,
+                    "CodeReview" => TaskType::CodeReview,
+                    "TestGeneration" => TaskType::TestGeneration,
+                    "TestExecution" => TaskType::TestExecution,
+                    "Exploration" => TaskType::Exploration,
+                    "Planning" => TaskType::Planning,
+                    "Synthesis" => TaskType::Synthesis,
+                    _ => TaskType::General,
+                };
+
+                let mut subtask = Subtask::new(description, task_type);
+
+                // Map agent name to ID
+                if let Some(agent_name) = suggested_agent {
+                    if let Some(agent) = registry.get(agent_name) {
+                        subtask.suggested_agent = Some(agent.id.clone());
+                    }
+                }
+
+                // Parse dependencies (indices to actual IDs)
+                if let Some(deps_arr) = deps_arr {
+                    let mut deps = Vec::new();
+                    for dep_idx in deps_arr {
+                        if let Some(idx) = dep_idx.as_u64() {
+                            // We'll resolve these to IDs after all subtasks are created
+                            deps.push(format!("idx:{}", idx));
+                        }
+                    }
+                    subtask.dependencies = deps;
+                }
+
+                subtasks.push(subtask);
+            }
+        }
+
+        // Resolve dependency indices to actual subtask IDs
+        // Collect indices and IDs first to avoid borrow checker issues
+        let subtask_ids: Vec<Id> = subtasks.iter().map(|s| s.id.clone()).collect();
+        for (_i, subtask) in subtasks.iter_mut().enumerate() {
+            let mut resolved_deps = Vec::new();
+            for dep in &subtask.dependencies {
+                if let Some(idx_str) = dep.strip_prefix("idx:") {
+                    if let Ok(idx) = idx_str.parse::<usize>() {
+                        if idx < subtask_ids.len() {
+                            resolved_deps.push(subtask_ids[idx].clone());
+                        }
+                    }
+                }
+            }
+            subtask.dependencies = resolved_deps;
+        }
+
+        // Parse parallel groups
+        if let Some(groups_arr) = analysis_json["parallel_groups"].as_array() {
+            for group in groups_arr {
+                if let Some(group_arr) = group.as_array() {
+                    let mut parallel_group = Vec::new();
+                    for idx in group_arr {
+                        if let Some(idx) = idx.as_u64() {
+                            if (idx as usize) < subtasks.len() {
+                                parallel_group.push(subtasks[idx as usize].id.clone());
+                            }
+                        }
+                    }
+                    if !parallel_group.is_empty() {
+                        parallel_groups.push(parallel_group);
+                    }
+                }
+            }
+        }
+
+        // If no subtasks were generated, create a single subtask from the original
+        if subtasks.is_empty() {
+            info!("LLM did not generate subtasks, using original task as single subtask");
+            let subtask = Subtask::new(&task.description, task.task_type);
+            subtasks.push(subtask);
+        }
+
+        let plan = Plan::new(task.clone())
+            .with_subtasks(subtasks)
+            .with_parallel_groups(parallel_groups);
+
+        info!("Generated plan with {} subtasks", plan.subtasks.len());
+        Ok(plan)
     }
 }
 
@@ -328,45 +524,146 @@ impl Orchestrator {
             registry,
             shared_memory: shared_memory.clone(),
             router: Router::new(),
-            planner: Planner::new(),
+            planner: Planner::new(Some(llm_client.clone())),
             executor: Executor::new(llm_client, shared_memory, event_tx, max_concurrent),
         }
     }
 
-    /// Execute a task with automatic routing
+    /// Execute a task with automatic routing and planning
     pub async fn execute_auto(&self, task: Task, session: &Session) -> Result<TaskResult> {
-        // Analyze the task
+        // Analyze the task for routing
         let analysis = {
             let registry = self.registry.read().await;
             self.router.analyze(self.llm_client.clone(), &registry, &task, session).await?
         };
-        
-        // Make routing decision
-        let decision = self.router.route(task.clone(), analysis).await?;
-        
-        // Execute with the first selected agent
-        if let Some(agent_id) = decision.selected_agents.first() {
-            let agent_opt = {
+
+        // Check if task decomposition is needed
+        let plan = if analysis.requires_subtasks || analysis.estimated_complexity > 5 {
+            info!("Task requires decomposition, generating plan...");
+            let registry = self.registry.read().await;
+            self.planner.plan(&task, session, &registry).await?
+        } else {
+            // Simple task - create a single-step plan
+            info!("Task is simple, executing directly...");
+            let mut plan = Plan::new(task.clone());
+            let subtask = Subtask::new(&task.description, task.task_type);
+            plan.subtasks = vec![subtask];
+            plan
+        };
+
+        info!("Executing plan with {} subtasks", plan.subtasks.len());
+
+        // Execute subtasks according to the plan
+        self.execute_plan(plan, session).await
+    }
+
+    /// Execute a plan (sequence of subtasks)
+    async fn execute_plan(&self, plan: Plan, session: &Session) -> Result<TaskResult> {
+        let mut results: HashMap<Id, TaskResult> = HashMap::new();
+        let mut completed: Vec<Id> = Vec::new();
+
+        // Execute subtasks in order, respecting dependencies
+        for subtask in &plan.subtasks {
+            // Wait for dependencies
+            for dep_id in &subtask.dependencies {
+                if !completed.contains(dep_id) {
+                    // Find and execute dependency first
+                    if let Some(dep_subtask) = plan.subtasks.iter().find(|s| &s.id == dep_id) {
+                        self.execute_subtask(dep_subtask.clone(), session, &mut results).await?;
+                        completed.push(dep_id.clone());
+                    }
+                }
+            }
+
+            // Execute this subtask
+            self.execute_subtask(subtask.clone(), session, &mut results).await?;
+            completed.push(subtask.id.clone());
+        }
+
+        // Synthesize final result from all subtask results
+        let mut final_output = String::new();
+        let mut all_success = true;
+        let mut errors = Vec::new();
+
+        for (id, result) in &results {
+            if result.success {
+                if !final_output.is_empty() {
+                    final_output.push_str("\n\n---\n\n");
+                }
+                final_output.push_str(&format!("**{}**: {}\n", id, result.output));
+            } else {
+                all_success = false;
+                if let Some(err) = &result.error {
+                    errors.push(format!("{}: {}", id, err));
+                }
+            }
+        }
+
+        Ok(TaskResult {
+            success: all_success,
+            output: final_output,
+            error: if errors.is_empty() { None } else { Some(errors.join("\n")) },
+            metadata: Default::default(),
+        })
+    }
+
+    /// Execute a single subtask
+    async fn execute_subtask(
+        &self,
+        subtask: Subtask,
+        session: &Session,
+        results: &mut HashMap<Id, TaskResult>,
+    ) -> Result<()> {
+        info!("Executing subtask: {}", subtask.description);
+
+        // Determine which agent to use
+        let agent = if let Some(agent_id) = &subtask.suggested_agent {
+            let registry = self.registry.read().await;
+            registry.get_by_id(agent_id).cloned()
+        } else {
+            // Fall back to routing
+            let temp_task = Task::new(&subtask.description, subtask.task_type);
+            let registry = self.registry.read().await;
+            let analysis = self.router.analyze(self.llm_client.clone(), &registry, &temp_task, session).await?;
+            let decision = self.router.route(temp_task, analysis).await?;
+
+            if let Some(agent_id) = decision.selected_agents.first() {
                 let registry = self.registry.read().await;
                 registry.get_by_id(agent_id).cloned()
-            };
-
-            if let Some(agent) = agent_opt {
-                let context = ExecutionContext::new(session.id.clone())
-                    .with_messages(session.messages.clone());
-                    
-                self.executor.execute_task(agent, task, context).await
             } else {
-                Err(anyhow!("Selected agent {} not found in registry", agent_id))
+                None
             }
+        };
+
+        if let Some(agent) = agent {
+            // Build context with dependency results
+            let mut context_messages = session.messages.clone();
+            for dep_id in &subtask.dependencies {
+                if let Some(dep_result) = results.get(dep_id) {
+                    context_messages.push(Message::system(&format!(
+                        "Previous subtask result ({}): {}",
+                        dep_id, dep_result.output
+                    )));
+                }
+            }
+
+            let context = ExecutionContext::new(session.id.clone())
+                .with_messages(context_messages);
+
+            let task = Task::new(&subtask.description, subtask.task_type);
+            let result = self.executor.execute_task(agent, task, context).await?;
+            results.insert(subtask.id.clone(), result);
         } else {
-            Ok(TaskResult {
+            let error_result = TaskResult {
                 success: false,
                 output: String::new(),
-                error: Some("No suitable agent found for this task".to_string()),
+                error: Some("No suitable agent found for subtask".to_string()),
                 metadata: Default::default(),
-            })
+            };
+            results.insert(subtask.id.clone(), error_result);
         }
+
+        Ok(())
     }
 
     /// Execute a chat with a specific agent
@@ -536,20 +833,83 @@ mod tests {
     // ==================== Planner Tests ====================
 
     #[test]
-    fn test_planner_new() {
-        let planner = Planner::new();
+    fn test_planner_new_with_llm() {
+        let llm_client = Arc::new(LlmClient::new("test-key", "gpt-4o", 4096, 0.7));
+        let planner = Planner::new(Some(llm_client));
+        let _ = planner;
+    }
+
+    #[test]
+    fn test_planner_new_without_llm() {
+        let planner = Planner::new(None);
         let _ = planner;
     }
 
     #[tokio::test]
-    async fn test_planner_plan_returns_empty() {
-        let planner = Planner::new();
+    async fn test_planner_plan_no_llm_returns_single_subtask() {
+        let planner = Planner::new(None);
         let task = Task::new("Test task", TaskType::CodeGeneration);
+        let session = Session::new("Test Session");
+        let registry = AgentRegistry::new();
+
+        let plan = planner.plan(&task, &session, &registry).await.unwrap();
+
+        assert_eq!(plan.subtasks.len(), 1);
+        assert_eq!(plan.subtasks[0].description, "Test task");
+        assert_eq!(plan.subtasks[0].task_type, TaskType::CodeGeneration);
+    }
+
+    #[tokio::test]
+    async fn test_planner_plan_with_llm_calls_api() {
+        let llm_client = Arc::new(LlmClient::new("test-key", "gpt-4o", 4096, 0.7));
+        let planner = Planner::new(Some(llm_client));
+        let task = Task::new("Write a hello world function", TaskType::CodeGeneration);
+        let session = Session::new("Test Session");
+        let mut registry = AgentRegistry::new();
+        registry.register(Agent::new("coder", AgentRole::Coder, "gpt-4o")
+            .with_description("Writes code"));
+
+        // This will call the LLM API - may fail if API key is invalid
+        // but should not panic
+        let result = planner.plan(&task, &session, &registry).await;
         
-        let result = planner.plan(&task).await.unwrap();
-        
-        // Currently returns empty vec (not yet implemented)
-        assert!(result.is_empty());
+        // Either success or API error is acceptable
+        match result {
+            Ok(plan) => {
+                assert!(!plan.subtasks.is_empty());
+            }
+            Err(e) => {
+                // API error is expected if key is invalid
+                assert!(e.to_string().contains("API") || e.to_string().contains("http") || e.to_string().contains("401"));
+            }
+        }
+    }
+
+    #[test]
+    fn test_subtask_creation() {
+        let subtask = Subtask::new("Write tests", TaskType::TestGeneration)
+            .with_suggested_agent("tester")
+            .with_dependencies(vec!["task-1", "task-2"]);
+
+        assert_eq!(subtask.description, "Write tests");
+        assert_eq!(subtask.task_type, TaskType::TestGeneration);
+        assert_eq!(subtask.suggested_agent, Some("tester".to_string()));
+        assert_eq!(subtask.dependencies.len(), 2);
+    }
+
+    #[test]
+    fn test_plan_creation() {
+        let task = Task::new("Build a feature", TaskType::CodeGeneration);
+        let subtasks = vec![
+            Subtask::new("Explore codebase", TaskType::Exploration),
+            Subtask::new("Write code", TaskType::CodeGeneration),
+        ];
+
+        let plan = Plan::new(task.clone()).with_subtasks(subtasks.clone());
+
+        assert_eq!(plan.subtasks.len(), 2);
+        assert_eq!(plan.execution_order.len(), 2);
+        assert_eq!(plan.original_task.description, "Build a feature");
     }
 
     // ==================== ExecutionContext Tests ====================
@@ -568,7 +928,7 @@ mod tests {
         let messages = vec![Message::user("Hello")];
         let ctx = ExecutionContext::new("session-123".to_string())
             .with_messages(messages.clone());
-        
+
         assert_eq!(ctx.messages.len(), 1);
         assert_eq!(ctx.messages[0].content, "Hello");
     }
