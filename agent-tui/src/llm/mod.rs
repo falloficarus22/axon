@@ -266,25 +266,46 @@ impl MockLlmClient {
         &self,
         messages: &[Message],
     ) -> Result<Pin<Box<dyn Stream<Item = Result<String>> + Send>>> {
-        self.record_call(messages, true);
+        let is_streaming = *self.streaming_enabled.read().await;
+        self.record_call(messages, is_streaming);
 
-        // Simulate latency
         let latency = *self.latency_ms.read().await;
-        
         let response = self.default_response.read().await.clone();
         
-        // Create a stream that yields characters one by one to simulate typing
-        let chars: Vec<char> = response.chars().collect();
-        let stream = futures::stream::iter(chars.into_iter().map(move |c| {
-            Ok(c.to_string())
-        }));
-
-        let boxed_stream: Pin<Box<dyn Stream<Item = Result<String>> + Send>> = Box::pin(stream);
-        
-        if latency > 0 {
-            // For simplicity, we don't add per-character latency in this mock
-            // but the total stream could be delayed if needed
-        }
+        let boxed_stream: Pin<Box<dyn Stream<Item = Result<String>> + Send>> = if is_streaming {
+            // Character-by-character streaming with optional latency
+            if latency > 0 {
+                let chars: Vec<char> = response.chars().collect();
+                let delay_per_char = latency / chars.len().max(1) as u64;
+                
+                Box::pin(futures::stream::unfold(0, move |idx| {
+                    let chars = chars.clone();
+                    async move {
+                        if idx < chars.len() {
+                            if delay_per_char > 0 {
+                                tokio::time::sleep(tokio::time::Duration::from_millis(delay_per_char)).await;
+                            }
+                            let chunk = chars[idx].to_string();
+                            Some((Ok(chunk), idx + 1))
+                        } else {
+                            None
+                        }
+                    }
+                }))
+            } else {
+                let chars: Vec<Result<String, anyhow::Error>> = response
+                    .chars()
+                    .map(|c| Ok(c.to_string()))
+                    .collect();
+                Box::pin(futures::stream::iter(chars))
+            }
+        } else {
+            // Non-streaming: return full response at once (with latency delay)
+            if latency > 0 {
+                tokio::time::sleep(tokio::time::Duration::from_millis(latency)).await;
+            }
+            Box::pin(futures::stream::iter(vec![Ok(response)]))
+        };
 
         Ok(boxed_stream)
     }
@@ -390,5 +411,75 @@ mod tests {
         
         mock.clear_history();
         assert_eq!(mock.call_count(), 0);
+    }
+
+    #[cfg(any(test, feature = "mock-llm"))]
+    #[tokio::test]
+    async fn test_mock_llm_streaming_disabled() {
+        let mock = MockLlmClient::new("Streaming response");
+        
+        mock.set_streaming(false).await;
+        
+        let messages = vec![Message::user("Test")];
+        let mut stream = mock.send_message_streaming(&messages).await.unwrap();
+        
+        // When streaming disabled, should get single chunk with full response
+        let chunk = stream.next().await.unwrap().unwrap();
+        assert_eq!(chunk, "Streaming response");
+        
+        // Should not have any more chunks
+        assert!(stream.next().await.is_none());
+        
+        // Verify call history records streaming as disabled
+        let history = mock.get_call_history();
+        assert_eq!(history.len(), 1);
+        assert!(!history[0].is_streaming);
+    }
+
+    #[cfg(any(test, feature = "mock-llm"))]
+    #[tokio::test]
+    async fn test_mock_llm_streaming_enabled() {
+        let mock = MockLlmClient::new("ABC");
+        
+        mock.set_streaming(true).await;
+        
+        let messages = vec![Message::user("Test")];
+        let mut stream = mock.send_message_streaming(&messages).await.unwrap();
+        
+        // When streaming enabled, should get character-by-character chunks
+        let mut collected = String::new();
+        while let Some(chunk) = stream.next().await {
+            collected.push_str(&chunk.unwrap());
+        }
+        
+        assert_eq!(collected, "ABC");
+        
+        // Verify call history records streaming as enabled
+        let history = mock.get_call_history();
+        assert!(history[0].is_streaming);
+    }
+
+    #[cfg(any(test, feature = "mock-llm"))]
+    #[tokio::test]
+    async fn test_mock_llm_streaming_with_latency() {
+        let mock = MockLlmClient::new("AB");
+        
+        mock.set_streaming(true).await;
+        mock.set_latency(20).await; // 20ms total, 10ms per char
+        
+        let messages = vec![Message::user("Test")];
+        
+        let start = std::time::Instant::now();
+        let mut stream = mock.send_message_streaming(&messages).await.unwrap();
+        
+        let mut collected = String::new();
+        while let Some(chunk) = stream.next().await {
+            collected.push_str(&chunk.unwrap());
+        }
+        let elapsed = start.elapsed().as_millis();
+        
+        assert_eq!(collected, "AB");
+        // With 20ms latency and 2 chars, should take at least ~10ms
+        assert!(elapsed >= 10, "Expected at least 10ms, got {}ms", elapsed);
     }
 }
