@@ -36,7 +36,7 @@ use crate::{
 };
 
 use self::components::{Chat, Input, Sidebar};
-use crate::persistence::{SessionStore, MemoryStore};
+use crate::persistence::{SessionStore, MemoryStore, SessionMetadata};
 use crate::shared::SharedMemory;
 
 /// Main application state
@@ -45,6 +45,8 @@ pub struct App {
     config: Config,
     /// Current session
     session: Session,
+    /// Saved sessions metadata
+    sessions: Vec<SessionMetadata>,
     /// Chat component
     chat: Chat,
     /// Input component
@@ -102,6 +104,8 @@ pub enum AppMode {
     MemoryManager,
     /// Confirmation dialog
     Confirm,
+    /// Sidebar focus mode
+    Sidebar,
 }
 
 impl App {
@@ -152,6 +156,9 @@ impl App {
         // Initialize shared memory
         let shared_memory = Arc::new(SharedMemory::new());
         
+        // Initialize session list (empty for now, will be loaded on tick or first draw)
+        let sessions = Vec::new();
+        
         // Set default active agent to coder for manual mode
         let active_agent = agent_registry.get("coder").cloned();
         
@@ -171,6 +178,7 @@ impl App {
         Ok(Self {
             config: config.clone(),
             session: session.clone(),
+            sessions,
             chat: Chat::new(),
             input: Input::new(),
             sidebar: Sidebar::new(),
@@ -284,6 +292,37 @@ impl App {
                             // Cancel current running task
                             self.cancel_current_task().await?;
                         }
+                        KeyCode::Char('p') => {
+                            self.sidebar.previous_session();
+                        }
+                        KeyCode::Char('n') => {
+                            self.sidebar.next_session(self.sessions.len());
+                        }
+                        KeyCode::Char('l') => {
+                            // Load selected session from sidebar
+                            let idx = self.sidebar.selected_session();
+                            if idx < self.sessions.len() {
+                                let session_id = self.sessions[idx].id.clone();
+                                match self.session_store.load(&session_id).await {
+                                    Ok(session) => {
+                                        self.session = session;
+                                        self.chat.clear();
+                                        for msg in &self.session.messages {
+                                            self.chat.add_message(msg.clone());
+                                        }
+                                        let msg = Message::system(&format!("Session '{}' loaded from sidebar.", self.session.title));
+                                        self.session.add_message(msg.clone());
+                                        self.chat.add_message(msg);
+                                        info!("Loaded session {} from sidebar", session_id);
+                                    }
+                                    Err(e) => {
+                                        let error_msg = format!("Failed to load session: {}", e);
+                                        self.chat.add_message(Message::system(&error_msg));
+                                        error!("{}", error_msg);
+                                    }
+                                }
+                            }
+                        }
                         _ => {}
                     }
                 } else {
@@ -299,7 +338,11 @@ impl App {
                             self.input.next_history();
                         }
                         KeyCode::Tab => {
-                            self.input.autocomplete();
+                            if self.show_sidebar {
+                                self.mode = AppMode::Sidebar;
+                            } else {
+                                self.input.autocomplete();
+                            }
                         }
                         KeyCode::Char('/') if self.input.is_empty() => {
                             // Enter command mode without inserting the slash
@@ -345,7 +388,28 @@ impl App {
                 _ => {}
             },
             AppMode::AgentSelect => match key.code {
-                KeyCode::Esc => {
+                KeyCode::Esc | KeyCode::Tab => {
+                    self.mode = AppMode::Normal;
+                }
+                KeyCode::Up | KeyCode::Char('p') => {
+                    self.sidebar.previous_session(); // Reusing navigation logic for now
+                }
+                KeyCode::Down | KeyCode::Char('n') => {
+                    let registry = self.agent_registry.blocking_read();
+                    self.sidebar.next_session(registry.list().len());
+                }
+                KeyCode::Enter | KeyCode::Char('l') => {
+                    let idx = self.sidebar.selected_session();
+                    let registry = self.agent_registry.blocking_read();
+                    let agents = registry.list();
+                    if idx < agents.len() {
+                        let agent = &agents[idx];
+                        self.active_agent = Some(agent.clone());
+                        let msg = Message::system(&format!("Selected agent: {} ({})", agent.name, agent.role.as_str()));
+                        self.session.add_message(msg.clone());
+                        self.chat.add_message(msg);
+                    }
+                    drop(registry);
                     self.mode = AppMode::Normal;
                 }
                 KeyCode::Char(c) if c.is_ascii_digit() => {
@@ -368,6 +432,44 @@ impl App {
             AppMode::MemoryManager => match key.code {
                 KeyCode::Esc | KeyCode::Char('q') => {
                     self.mode = AppMode::Normal;
+                }
+                _ => {}
+            },
+            AppMode::Sidebar => match key.code {
+                KeyCode::Tab | KeyCode::Esc => {
+                    self.mode = AppMode::Normal;
+                }
+                KeyCode::Char('p') | KeyCode::Up => {
+                    self.sidebar.previous_session();
+                }
+                KeyCode::Char('n') | KeyCode::Down => {
+                    self.sidebar.next_session(self.sessions.len());
+                }
+                KeyCode::Char('l') | KeyCode::Enter => {
+                    // Load selected session from sidebar
+                    let idx = self.sidebar.selected_session();
+                    if idx < self.sessions.len() {
+                        let session_id = self.sessions[idx].id.clone();
+                        match self.session_store.load(&session_id).await {
+                            Ok(session) => {
+                                self.session = session;
+                                self.chat.clear();
+                                for msg in &self.session.messages {
+                                    self.chat.add_message(msg.clone());
+                                }
+                                let msg = Message::system(&format!("Session '{}' loaded from sidebar.", self.session.title));
+                                self.session.add_message(msg.clone());
+                                self.chat.add_message(msg);
+                                info!("Loaded session {} from sidebar", session_id);
+                                self.mode = AppMode::Normal;
+                            }
+                            Err(e) => {
+                                let error_msg = format!("Failed to load session: {}", e);
+                                self.chat.add_message(Message::system(&error_msg));
+                                error!("{}", error_msg);
+                            }
+                        }
+                    }
                 }
                 _ => {}
             },
@@ -482,6 +584,11 @@ impl App {
 
     /// Handle tick event
     async fn on_tick(&mut self) -> Result<()> {
+        // Update session list periodically
+        if let Ok(sessions) = self.session_store.list().await {
+            self.sessions = sessions;
+        }
+
         // Handle auto-save
         let auto_save_interval = Duration::from_secs(self.config.persistence.auto_save_interval);
         if self.last_save.elapsed() >= auto_save_interval {
@@ -551,7 +658,7 @@ impl App {
 
                         // Spawn the agent execution in a background task
                         let handle = tokio::spawn(async move {
-                            let result = orchestrator.execute_chat_streaming(agent, content, history).await;
+                            let result = orchestrator.execute_chat_streaming(agent, content, history, &session_clone.id).await;
 
                             if let Err(e) = result {
                                 let _ = event_tx.send(AppEvent::Error(format!(
@@ -963,7 +1070,8 @@ impl App {
             let registry = self.agent_registry.blocking_read();
             let agents: Vec<_> = registry.list().to_vec();
             drop(registry);
-            self.sidebar.draw(frame, main_layout[0], &self.session, &agents, self.active_agent.as_ref());
+            self.sidebar.focused = self.mode == AppMode::Sidebar;
+            self.sidebar.draw(frame, main_layout[0], &self.session, &agents, self.active_agent.as_ref(), &self.sessions);
         }
 
         // Main content area

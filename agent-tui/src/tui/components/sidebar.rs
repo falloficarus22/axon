@@ -9,6 +9,7 @@ use ratatui::{
 };
 
 use crate::types::{Agent, AgentState, Session, SessionMode};
+use crate::persistence::SessionMetadata;
 
 /// Sidebar component for displaying sessions and agents
 pub struct Sidebar {
@@ -16,6 +17,8 @@ pub struct Sidebar {
     selected_session: usize,
     /// Selected agent index
     selected_agent: usize,
+    /// Whether the sidebar is focused
+    pub focused: bool,
 }
 
 impl Sidebar {
@@ -23,6 +26,7 @@ impl Sidebar {
         Self {
             selected_session: 0,
             selected_agent: 0,
+            focused: false,
         }
     }
 
@@ -34,17 +38,18 @@ impl Sidebar {
         session: &Session,
         agents: &[Agent],
         active_agent: Option<&Agent>,
+        sessions: &[SessionMetadata],
     ) {
         let layout = Layout::default()
             .direction(Direction::Vertical)
-            .constraints([Constraint::Length(10), Constraint::Min(0)])
+            .constraints([Constraint::Length(12), Constraint::Min(0)])
             .split(area);
 
         // Agent status section
         self.draw_agent_status(frame, layout[0], session, agents, active_agent);
 
         // Sessions section
-        self.draw_sessions(frame, layout[1], session);
+        self.draw_sessions(frame, layout[1], sessions, session.id.as_str());
     }
 
     /// Draw agent status panel
@@ -113,32 +118,31 @@ impl Sidebar {
     }
 
     /// Draw sessions list
-    fn draw_sessions(&self, frame: &mut Frame, area: Rect, _session: &Session) {
+    fn draw_sessions(&self, frame: &mut Frame, area: Rect, sessions: &[SessionMetadata], current_session_id: &str) {
+        let border_color = if self.focused { Color::Yellow } else { Color::Cyan };
         let block = Block::default()
             .title(" Sessions ")
             .borders(Borders::ALL)
-            .border_style(Style::default().fg(Color::Cyan));
-
-        // Placeholder sessions
-        let sessions = [
-            "Current Session",
-            "Previous Session 1",
-            "Previous Session 2",
-        ];
+            .border_style(Style::default().fg(border_color));
 
         let items: Vec<ListItem> = sessions
             .iter()
             .enumerate()
             .map(|(i, s)| {
-                let style = if i == self.selected_session {
-                    Style::default()
-                        .bg(Color::Blue)
-                        .fg(Color::White)
-                        .add_modifier(Modifier::BOLD)
-                } else {
-                    Style::default()
-                };
-                ListItem::new(*s).style(style)
+                let is_current = s.id == current_session_id;
+                let is_selected = i == self.selected_session;
+                
+                let mut style = Style::default();
+                if is_selected {
+                    let bg = if self.focused { Color::Yellow } else { Color::Black };
+                    let fg = if self.focused { Color::Black } else { Color::White };
+                    style = style.bg(bg).fg(fg).add_modifier(Modifier::BOLD);
+                }
+                
+                let prefix = if is_current { "* " } else { "  " };
+                let content = format!("{}{}", prefix, s.title);
+                
+                ListItem::new(content).style(style)
             })
             .collect();
 

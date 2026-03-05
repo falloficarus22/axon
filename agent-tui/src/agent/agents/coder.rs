@@ -9,9 +9,11 @@ use regex::Regex;
 use std::collections::HashMap;
 use std::fs;
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
 
 use crate::types::{Agent, AgentRole, Capability, Task, TaskResult, TaskType};
 use crate::agent::TaskProcessor;
+use crate::shared::SharedMemory;
 
 /// Code block extracted from LLM response
 #[derive(Debug, Clone, PartialEq)]
@@ -50,7 +52,7 @@ pub enum FileOperation {
 pub struct CoderAgent;
 
 impl TaskProcessor for CoderAgent {
-    fn process_task(&self, task: &Task, response: &str) -> Result<TaskResult> {
+    fn process_task(&self, task: &Task, response: &str, _shared_memory: Arc<SharedMemory>) -> Result<TaskResult> {
         Self::process_task_internal(task, response)
     }
 }
@@ -583,7 +585,8 @@ Second file:\n\
         let llm_response = "Here's the code:\n```rust\nfn hello() {\n    println!(\"Hello\");\n}\n```";
 
         let agent = CoderAgent;
-        let result = agent.process_task(&task, llm_response).unwrap();
+        let shared_memory = Arc::new(SharedMemory::new());
+        let result = agent.process_task(&task, llm_response, shared_memory).unwrap();
         assert!(result.success);
         assert!(result.output.contains("fn hello()"));
         assert_eq!(result.error, None);
@@ -598,7 +601,8 @@ Second file:\n\
         let llm_response = "```rust:src/main.rs\nfn main() {\n    println!(\"Hello, world!\");\n}\n```";
 
         let agent = CoderAgent;
-        let result = agent.process_task(&task, llm_response).unwrap();
+        let shared_memory = Arc::new(SharedMemory::new());
+        let result = agent.process_task(&task, llm_response, shared_memory).unwrap();
         assert!(result.success);
 
         let generated_files = result.metadata.get("generated_files").unwrap();
@@ -611,7 +615,8 @@ Second file:\n\
         let llm_response = "Updated:\n```python:app.py\ndef greet(name):\n    print(f\"Hello, {name}!\")\n```";
 
         let agent = CoderAgent;
-        let result = agent.process_task(&task, llm_response).unwrap();
+        let shared_memory = Arc::new(SharedMemory::new());
+        let result = agent.process_task(&task, llm_response, shared_memory).unwrap();
         assert!(result.success);
 
         let edited_files = result.metadata.get("edited_files").unwrap();
@@ -624,7 +629,8 @@ Second file:\n\
         let llm_response = "This is just an explanation without any code blocks.";
 
         let agent = CoderAgent;
-        let result = agent.process_task(&task, llm_response).unwrap();
+        let shared_memory = Arc::new(SharedMemory::new());
+        let result = agent.process_task(&task, llm_response, shared_memory).unwrap();
         assert!(result.success);
         assert_eq!(result.output, llm_response);
         assert!(result.metadata.is_empty());
@@ -636,7 +642,8 @@ Second file:\n\
         let llm_response = "Some response";
 
         let agent = CoderAgent;
-        let result = agent.process_task(&task, llm_response);
+        let shared_memory = Arc::new(SharedMemory::new());
+        let result = agent.process_task(&task, llm_response, shared_memory);
         assert!(result.is_err());
         assert!(result.unwrap_err().to_string().contains("Unsupported task type"));
     }
@@ -650,7 +657,8 @@ Second file:\n\
 ```rust:src/main.rs\nfn main() {}\n```";
 
         let agent = CoderAgent;
-        let result = agent.process_task(&task, llm_response).unwrap();
+        let shared_memory = Arc::new(SharedMemory::new());
+        let result = agent.process_task(&task, llm_response, shared_memory).unwrap();
         assert!(result.success);
 
         let code_blocks_count = result.metadata.get("code_blocks").unwrap();

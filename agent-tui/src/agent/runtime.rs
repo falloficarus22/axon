@@ -30,11 +30,13 @@ pub enum AgentCommand {
     Chat {
         message: String,
         history: Vec<Message>,
+        context: ExecutionContext,
     },
     /// Send a streaming chat message
     StreamChat {
         message: String,
         history: Vec<Message>,
+        context: ExecutionContext,
     },
     /// Get the current state of the agent
     GetState,
@@ -102,8 +104,8 @@ impl AgentHandle {
     }
 
     /// Send a chat message
-    pub async fn chat(&self, message: String, history: Vec<Message>) -> Result<String> {
-        match self.send_command(AgentCommand::Chat { message, history }).await? {
+    pub async fn chat(&self, message: String, history: Vec<Message>, context: ExecutionContext) -> Result<String> {
+        match self.send_command(AgentCommand::Chat { message, history, context }).await? {
             AgentResponse::ChatResponse(content) => Ok(content),
             AgentResponse::Error(e) => Err(anyhow!(e)),
             _ => Err(anyhow!("Unexpected response from agent")),
@@ -111,8 +113,8 @@ impl AgentHandle {
     }
 
     /// Send a streaming chat message
-    pub async fn chat_streaming(&self, message: String, history: Vec<Message>) -> Result<String> {
-        match self.send_command(AgentCommand::StreamChat { message, history }).await? {
+    pub async fn chat_streaming(&self, message: String, history: Vec<Message>, context: ExecutionContext) -> Result<String> {
+        match self.send_command(AgentCommand::StreamChat { message, history, context }).await? {
             AgentResponse::ChatResponse(content) => Ok(content),
             AgentResponse::Error(e) => Err(anyhow!(e)),
             _ => Err(anyhow!("Unexpected response from agent")),
@@ -176,7 +178,11 @@ impl AgentRuntime {
     fn get_processor(role: AgentRole) -> Option<Box<dyn TaskProcessor>> {
         match role {
             AgentRole::Coder => Some(Box::new(crate::agent::agents::coder::CoderAgent)),
-            _ => None,
+            AgentRole::Planner => Some(Box::new(crate::agent::agents::PlannerAgent)),
+            AgentRole::Reviewer => Some(Box::new(crate::agent::agents::ReviewerAgent)),
+            AgentRole::Tester => Some(Box::new(crate::agent::agents::TesterAgent)),
+            AgentRole::Explorer => Some(Box::new(crate::agent::agents::ExplorerAgent)),
+            AgentRole::Integrator => Some(Box::new(crate::agent::agents::IntegratorAgent)),
         }
     }
 
@@ -243,11 +249,11 @@ impl AgentRuntime {
             AgentCommand::ProcessTask { task, context } => {
                 self.handle_process_task(agent_id, *task, context).await
             }
-            AgentCommand::Chat { message, history } => {
-                self.handle_chat(agent_id, message, history).await
+            AgentCommand::Chat { message, history, context } => {
+                self.handle_chat(agent_id, message, history, context).await
             }
-            AgentCommand::StreamChat { message, history } => {
-                self.handle_stream_chat(agent_id, message, history).await
+            AgentCommand::StreamChat { message, history, context } => {
+                self.handle_stream_chat(agent_id, message, history, context).await
             }
             AgentCommand::GetState => {
                 let state = self.agent.read().await.state;
@@ -336,7 +342,7 @@ impl AgentRuntime {
         }).await;
 
         // Build messages for LLM
-        let system_prompt = {
+        let mut system_prompt = {
             let agent = self.agent.read().await;
             if agent.system_prompt.is_empty() {
                 format!("You are a {} agent. {}", agent.role.as_str(), agent.role.description())
@@ -344,6 +350,33 @@ impl AgentRuntime {
                 agent.system_prompt.clone()
             }
         };
+
+        // Inject shared memory context into system prompt
+        let mut shared_context = String::from("\n\nShared Memory Context:\n");
+        let mut has_context = false;
+
+        // 1. Global context
+        if let Some(val) = self.shared_memory.get_global("project_info") {
+            shared_context.push_str(&format!("Global Project Info: {}\n", val));
+            has_context = true;
+        }
+
+        // 2. Session context
+        let session_id = context.session_id.clone();
+        if let Some(val) = self.shared_memory.get_session(&session_id, "relevant_context") {
+            shared_context.push_str(&format!("Session Context: {}\n", val));
+            has_context = true;
+        }
+
+        // 3. Agent context
+        if let Some(val) = self.shared_memory.get_agent(agent_id, "state") {
+            shared_context.push_str(&format!("Agent State: {}\n", val));
+            has_context = true;
+        }
+
+        if has_context {
+            system_prompt.push_str(&shared_context);
+        }
 
         let mut messages = vec![Message::system(&system_prompt)];
         messages.extend(context.messages);
@@ -365,7 +398,7 @@ impl AgentRuntime {
 
                 // Process the response using specialized agent logic via TaskProcessor trait
                 let mut result = if let Some(processor) = Self::get_processor(agent_role) {
-                    match processor.process_task(&task, &response) {
+                    match processor.process_task(&task, &response, self.shared_memory.clone()) {
                         Ok(res) => res,
                         Err(e) => {
                             warn!("Agent {} specialized processing failed: {}", agent_id, e);
@@ -427,6 +460,7 @@ impl AgentRuntime {
         agent_id: &Id,
         message: String,
         history: Vec<Message>,
+        context: ExecutionContext,
     ) -> AgentResponse {
         // Update state to running
         {
@@ -435,7 +469,7 @@ impl AgentRuntime {
         }
 
         // Build messages for LLM
-        let system_prompt = {
+        let mut system_prompt = {
             let agent = self.agent.read().await;
             if agent.system_prompt.is_empty() {
                 format!("You are a {} agent. {}", agent.role.as_str(), agent.role.description())
@@ -443,6 +477,30 @@ impl AgentRuntime {
                 agent.system_prompt.clone()
             }
         };
+
+        // Inject shared memory context into system prompt
+        let mut shared_context = String::from("\n\nShared Memory Context:\n");
+        let mut has_context = false;
+
+        if let Some(val) = self.shared_memory.get_global("project_info") {
+            shared_context.push_str(&format!("Global Project Info: {}\n", val));
+            has_context = true;
+        }
+
+        let session_id = context.session_id.clone();
+        if let Some(val) = self.shared_memory.get_session(&session_id, "relevant_context") {
+            shared_context.push_str(&format!("Session Context: {}\n", val));
+            has_context = true;
+        }
+
+        if let Some(val) = self.shared_memory.get_agent(agent_id, "state") {
+            shared_context.push_str(&format!("Agent State: {}\n", val));
+            has_context = true;
+        }
+
+        if has_context {
+            system_prompt.push_str(&shared_context);
+        }
 
         let mut messages = vec![Message::system(&system_prompt)];
         messages.extend(history);
@@ -489,6 +547,7 @@ impl AgentRuntime {
         agent_id: &Id,
         message: String,
         history: Vec<Message>,
+        context: ExecutionContext,
     ) -> AgentResponse {
         // Update state to running
         {
@@ -497,7 +556,7 @@ impl AgentRuntime {
         }
 
         // Build messages for LLM
-        let system_prompt = {
+        let mut system_prompt = {
             let agent = self.agent.read().await;
             if agent.system_prompt.is_empty() {
                 format!("You are a {} agent. {}", agent.role.as_str(), agent.role.description())
@@ -505,6 +564,30 @@ impl AgentRuntime {
                 agent.system_prompt.clone()
             }
         };
+
+        // Inject shared memory context into system prompt
+        let mut shared_context = String::from("\n\nShared Memory Context:\n");
+        let mut has_context = false;
+
+        if let Some(val) = self.shared_memory.get_global("project_info") {
+            shared_context.push_str(&format!("Global Project Info: {}\n", val));
+            has_context = true;
+        }
+
+        let session_id = context.session_id.clone();
+        if let Some(val) = self.shared_memory.get_session(&session_id, "relevant_context") {
+            shared_context.push_str(&format!("Session Context: {}\n", val));
+            has_context = true;
+        }
+
+        if let Some(val) = self.shared_memory.get_agent(agent_id, "state") {
+            shared_context.push_str(&format!("Agent State: {}\n", val));
+            has_context = true;
+        }
+
+        if has_context {
+            system_prompt.push_str(&shared_context);
+        }
 
         let mut messages = vec![Message::system(&system_prompt)];
         messages.extend(history);
@@ -657,12 +740,14 @@ mod tests {
         let command = AgentCommand::Chat {
             message: "Hello".to_string(),
             history: vec![Message::user("Hi")],
+            context: ExecutionContext::new("session-123"),
         };
 
         match command {
-            AgentCommand::Chat { message, history } => {
+            AgentCommand::Chat { message, history, context } => {
                 assert_eq!(message, "Hello");
                 assert_eq!(history.len(), 1);
+                assert_eq!(context.session_id, "session-123");
             }
             _ => panic!("Wrong variant"),
         }
@@ -673,12 +758,14 @@ mod tests {
         let command = AgentCommand::StreamChat {
             message: "Stream me".to_string(),
             history: vec![],
+            context: ExecutionContext::new("session-123"),
         };
 
         match command {
-            AgentCommand::StreamChat { message, history } => {
+            AgentCommand::StreamChat { message, history, context } => {
                 assert_eq!(message, "Stream me");
                 assert!(history.is_empty());
+                assert_eq!(context.session_id, "session-123");
             }
             _ => panic!("Wrong variant"),
         }

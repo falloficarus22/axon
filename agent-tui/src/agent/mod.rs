@@ -4,11 +4,13 @@ pub mod runtime;
 pub use runtime::{AgentHandle, AgentInstance, AgentRuntimeBuilder, AgentEvent};
 
 use crate::types::{Agent, AgentRole, Capability, Task, TaskResult};
+use crate::shared::SharedMemory;
 use anyhow::Result;
+use std::sync::Arc;
 
 /// Trait for specialized agent task processing
 pub trait TaskProcessor: Send + Sync {
-    fn process_task(&self, task: &Task, response: &str) -> Result<TaskResult>;
+    fn process_task(&self, task: &Task, response: &str, shared_memory: Arc<SharedMemory>) -> Result<TaskResult>;
 }
 
 /// Registry of available agents

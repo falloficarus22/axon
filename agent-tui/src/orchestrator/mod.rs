@@ -411,6 +411,7 @@ impl Executor {
         agent: Agent,
         message: String,
         history: Vec<Message>,
+        session_id: &str,
     ) -> Result<String> {
         debug!("Executing chat with agent {}", agent.name);
 
@@ -423,8 +424,10 @@ impl Executor {
             self.pool.spawn_agent(agent).await?
         };
 
+        let context = ExecutionContext::new(session_id).with_messages(history.clone());
+
         // Execute the chat
-        let result = handle.chat(message, history).await;
+        let result = handle.chat(message, history, context).await;
 
         result.map_err(|e| anyhow!("Chat execution failed: {}", e))
     }
@@ -435,6 +438,7 @@ impl Executor {
         agent: Agent,
         message: String,
         history: Vec<Message>,
+        session_id: &str,
     ) -> Result<String> {
         debug!("Executing streaming chat with agent {}", agent.name);
 
@@ -447,8 +451,10 @@ impl Executor {
             self.pool.spawn_agent(agent).await?
         };
 
+        let context = ExecutionContext::new(session_id).with_messages(history.clone());
+
         // Execute the streaming chat
-        let result = handle.chat_streaming(message, history).await;
+        let result = handle.chat_streaming(message, history, context).await;
 
         result.map_err(|e| anyhow!("Streaming chat execution failed: {}", e))
     }
@@ -710,8 +716,9 @@ impl Orchestrator {
         agent: Agent,
         message: String,
         history: Vec<Message>,
+        session_id: &str,
     ) -> Result<String> {
-        self.executor.execute_chat(agent, message, history).await
+        self.executor.execute_chat(agent, message, history, session_id).await
     }
 
     /// Execute a streaming chat with a specific agent
@@ -720,8 +727,9 @@ impl Orchestrator {
         agent: Agent,
         message: String,
         history: Vec<Message>,
+        session_id: &str,
     ) -> Result<String> {
-        self.executor.execute_chat_streaming(agent, message, history).await
+        self.executor.execute_chat_streaming(agent, message, history, session_id).await
     }
 
     /// Execute a task with a specific agent
@@ -1049,6 +1057,6 @@ mod tests {
 
         // This will call the LLM API - the result depends on API availability
         // The test verifies the function completes without panicking
-        let _ = orchestrator.execute_chat_streaming(agent, "Test".to_string(), history).await;
+        let _ = orchestrator.execute_chat_streaming(agent, "Test".to_string(), history, "test-session").await;
     }
 }
